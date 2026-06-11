@@ -93,6 +93,47 @@ The script will display:
 4. **Workout Analysis**: Detected workout type (e.g., "15 minute warm up, 3 x 15 minutes of Sweet Spot with 5 minute recovery between, and 10 minute cool down")
 5. **Lap Breakdown**: Table showing duration, distance, avg power, avg HR, and zone for each lap
 
+## Local Database & Trends
+
+All activities can be replicated into a local SQLite database (`data/strava.db`)
+for offline analysis and long-term trends.
+
+```bash
+# Sync: activity list + per-activity detail/streams/laps + derived metrics
+# (TRIMP, NP, IF, TSS, zone times). Resumable — interrupt or hit the API
+# quota and the next run continues where it left off.
+python -m stravaclient sync
+
+# Limit how many activities get enriched this run
+python -m stravaclient sync --limit 50
+
+# Only refresh the activity list (cheap, ~15 requests for a full history)
+python -m stravaclient sync --no-enrich
+
+# Replication progress and database contents
+python -m stravaclient status
+
+# Trends
+python -m stravaclient trends --metric miles --by week --last 12
+python -m stravaclient trends --metric tss --by month --since 2026-01-01
+python -m stravaclient trends --metric trimp --by month --sport Ride --no-commutes
+```
+
+Trend metrics: `miles`, `hours`, `elevation`, `tss`, `trimp`, `kj`, `rides`
+(buckets: `week`, `month`, `year`). Distance/time/elevation work from summary
+data alone; TSS and TRIMP need streams, which are fetched during enrichment.
+
+**Backfill and rate limits:** enrichment costs 3 API requests per activity.
+Strava allows ~100 read requests per 15 minutes and ~1,000 per day, so a full
+multi-year backfill takes several days of `sync` runs. The sync engine sleeps
+through 15-minute windows automatically and stops cleanly with a resume
+message when the daily quota is reached.
+
+**Zone history:** Strava only exposes your *current* zones, so the database
+versions them over time (`athlete_zones` table) and computes each activity's
+metrics with the zones in effect on its date. Past FTP changes can be seeded
+manually with `Database.seed_zones()` so historical TSS uses the right FTP.
+
 ## Power Zones
 
 The analyzer uses the standard 7-zone power model:

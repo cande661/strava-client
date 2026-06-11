@@ -1,0 +1,130 @@
+"""CLI for the local Strava replica.
+
+Run from the project root (config.json and data/strava.db are resolved
+relative to the working directory):
+
+    python -m stravaclient sync [--full] [--limit N] [--no-enrich]
+    python -m stravaclient status
+    python -m stravaclient trends --metric miles --by week --since 2026-01-01
+    python -m stravaclient recompute
+"""
+
+import argparse
+import sys
+
+from .db import Database, DEFAULT_DB_PATH
+from .trends import compute_trends, format_trends, METRICS
+
+
+def cmd_sync(args):
+    from strava_client import StravaClient
+    from .sync import SyncEngine
+
+    db = Database(args.db)
+    client = StravaClient(args.config)
+    engine = SyncEngine(db, client)
+    completed = engine.run(full=args.full, limit=args.limit,
+                           skip_enrich=args.no_enrich)
+    return 0 if completed else 2
+
+
+def cmd_status(args):
+    db = Database(args.db)
+    s = db.status()
+    print(f"Database: {args.db}")
+    print(f"Activities:       {s['activities']}")
+    print(f"  with detail:    {s['with_detail']}")
+    print(f"  with streams:   {s['with_streams']}")
+    print(f"  with laps:      {s['with_laps']}")
+    print(f"  with metrics:   {s['with_metrics']}")
+    print(f"Gear:             {s['gear']}")
+    print(f"Zones versions:   {s['zones_versions']}")
+    if s['oldest']:
+        print(f"Date range:       {s['oldest'][:10]} to {s['newest'][:10]}")
+    print(f"Last list sync:   {s['last_list_sync'] or 'never'}")
+    pending = s['activities'] - s['with_streams']
+    if pending > 0:
+        print(f"\n{pending} activities still need enrichment "
+              f"(~{pending * 3} API requests). Run: python -m stravaclient sync")
+    return 0
+
+
+def cmd_trends(args):
+    db = Database(args.db)
+    commutes = None
+    if args.commutes_only:
+        commutes = True
+    elif args.no_commutes:
+        commutes = False
+    results = compute_trends(db, metric=args.metric, by=args.by,
+                             since=args.since, sport=args.sport,
+                             commutes=commutes)
+    if args.last and len(results) > args.last:
+        results = results[-args.last:]
+    title = f"{args.metric} per {args.by}"
+    if args.sport:
+        title += f" ({args.sport})"
+    print(title)
+    print("-" * len(title))
+    print(format_trends(results, args.metric))
+    return 0
+
+
+def cmd_recompute(args):
+    from .sync import SyncEngine
+
+    db = Database(args.db)
+    engine = SyncEngine(db, client=None)
+    n = engine.compute_metrics(recompute=True)
+    print(f"Recomputed metrics for {n} activities")
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog='python -m stravaclient',
+        description='Local Strava replica: sync, status, and trends')
+    parser.add_argument('--db', default=DEFAULT_DB_PATH,
+                        help=f'database path (default: {DEFAULT_DB_PATH})')
+    parser.add_argument('--config', default='config.json',
+                        help='Strava credentials file (default: config.json)')
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    p = sub.add_parser('sync', help='sync activities from Strava')
+    p.add_argument('--full', action='store_true',
+                   help='re-list all activities, not just recent ones')
+    p.add_argument('--limit', type=int, default=None,
+                   help='max activities to enrich this run')
+    p.add_argument('--no-enrich', action='store_true',
+                   help='only sync the activity list, skip detail/streams/laps')
+    p.set_defaults(func=cmd_sync)
+
+    p = sub.add_parser('status', help='show database status')
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser('trends', help='aggregate metrics over time')
+    p.add_argument('--metric', default='miles', choices=sorted(METRICS),
+                   help='metric to aggregate (default: miles)')
+    p.add_argument('--by', default='week', choices=['week', 'month', 'year'],
+                   help='bucket size (default: week)')
+    p.add_argument('--since', default=None, metavar='YYYY-MM-DD',
+                   help='only include activities on/after this date')
+    p.add_argument('--sport', default=None,
+                   help="filter by sport type (e.g. 'Ride', 'VirtualRide')")
+    p.add_argument('--last', type=int, default=None, metavar='N',
+                   help='show only the last N buckets')
+    p.add_argument('--commutes-only', action='store_true',
+                   help='only commute-tagged activities')
+    p.add_argument('--no-commutes', action='store_true',
+                   help='exclude commute-tagged activities')
+    p.set_defaults(func=cmd_trends)
+
+    p = sub.add_parser('recompute', help='recompute derived metrics for all activities')
+    p.set_defaults(func=cmd_recompute)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
