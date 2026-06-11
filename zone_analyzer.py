@@ -227,7 +227,8 @@ class ZoneAnalyzer:
         return round(mean_fourth ** 0.25)
 
     def calculate_trimp(self, hr_stream: List[int], time_stream: List[int],
-                        hr_rest: int = 60, sex: str = 'male') -> Optional[float]:
+                        hr_rest: int = 60, sex: str = 'male',
+                        hr_max: Optional[float] = None) -> Optional[float]:
         """
         Calculate Training Impulse (TRIMP) using Bannister's formula.
 
@@ -237,18 +238,20 @@ class ZoneAnalyzer:
           HRr = (HR_exercise - HR_rest) / (HR_max - HR_rest)
           b   = 1.92 for males, 1.67 for females
 
-        HR_max is estimated as Zone 5 lower bound / 0.90, since Zone 5
-        typically begins at approximately 90% of maximum heart rate.
+        When hr_max is not given, it is estimated as Zone 5 lower bound
+        / 0.90, since Zone 5 typically begins at approximately 90% of
+        maximum heart rate.
         """
         if not hr_stream or not time_stream:
             return None
 
-        # Estimate HR_max from zones: Zone 5 lower bound / 0.90
-        if len(self.hr_zones) >= 5:
-            zone5_lower = self.hr_zones[4][0]
-            hr_max = round(zone5_lower / 0.90)
-        else:
-            hr_max = max(hr_stream)
+        if hr_max is None:
+            # Estimate HR_max from zones: Zone 5 lower bound / 0.90
+            if len(self.hr_zones) >= 5:
+                zone5_lower = self.hr_zones[4][0]
+                hr_max = round(zone5_lower / 0.90)
+            else:
+                hr_max = max(hr_stream)
 
         b = 1.92 if sex == 'male' else 1.67
         trimp = 0.0

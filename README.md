@@ -142,9 +142,19 @@ python -m stravaclient recompute                          # re-derive metrics
 ```
 
 Each `--set-ftp` builds Strava-style power zones (55/75/90/105/120/150% of
-FTP) effective from that date until the next version; HR zones are copied
-from the nearest existing version. Activities older than the earliest version
-fall back to it.
+FTP) effective from that date until the next version. Activities older than
+the earliest version fall back to it.
+
+**Age-based max HR:** store a birthdate and max HR is estimated as
+`205.8 - 0.61 * age`:
+
+```bash
+python -m stravaclient zones --set-birthdate 1985-08-05
+```
+
+With a birthdate set, TRIMP uses the age-based max HR for each activity's
+date (instead of the zone-5/0.90 estimate), and `--set-ftp` scales HR zone
+boundaries by the max-HR ratio between dates rather than copying them.
 
 ## Power Zones
 

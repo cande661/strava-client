@@ -19,7 +19,8 @@ import requests
 
 from strava_client import StravaClient, RateLimitError
 from .db import Database
-from .metrics import compute_activity_metrics, estimate_ftp
+from .metrics import (compute_activity_metrics, estimate_ftp,
+                      hr_max_for_age, age_on)
 
 STREAM_KEYS = ['time', 'distance', 'latlng', 'altitude', 'velocity_smooth',
                'heartrate', 'cadence', 'watts', 'temp', 'moving', 'grade_smooth']
@@ -187,16 +188,21 @@ class SyncEngine:
     def compute_metrics(self, recompute: bool = False) -> int:
         rows = (self.db.activities_with_streams() if recompute
                 else self.db.activities_needing_metrics())
+        birthdate = self.db.get_state('birthdate')
         computed = 0
         for row in rows:
-            zones_row = self.db.zones_for_date(row['start_date_local']
-                                               or row['start_date'] or '')
+            activity_date = row['start_date_local'] or row['start_date'] or ''
+            zones_row = self.db.zones_for_date(activity_date)
             if not zones_row:
                 print("  No athlete zones recorded yet; run a sync first.")
                 break
+            hr_max = None
+            if birthdate and activity_date:
+                hr_max = hr_max_for_age(age_on(birthdate, activity_date))
             streams = self.db.get_streams(row['id'])
             laps = self.db.get_laps(row['id'])
-            metrics = compute_activity_metrics(row, streams, laps, zones_row)
+            metrics = compute_activity_metrics(row, streams, laps, zones_row,
+                                               hr_max=hr_max)
             self.db.save_derived_metrics(row['id'], metrics)
             computed += 1
         return computed

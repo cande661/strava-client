@@ -72,9 +72,20 @@ def cmd_trends(args):
 
 def cmd_zones(args):
     import json
-    from .metrics import power_zones_from_ftp, estimate_ftp
+    from datetime import date
+    from .metrics import (power_zones_from_ftp, estimate_ftp,
+                          hr_max_for_age, age_on, scale_hr_zones)
 
     db = Database(args.db)
+
+    if args.set_birthdate:
+        db.set_state('birthdate', args.set_birthdate)
+        age = age_on(args.set_birthdate, date.today().isoformat())
+        print(f"Birthdate set. Current age {age:.1f}, estimated max HR "
+              f"{hr_max_for_age(age):.0f} bpm (205.8 - 0.61 * age).")
+        print("TRIMP now uses this estimate; seeded zones scale HR boundaries "
+              "by age. Run 'recompute' to update existing metrics.")
+        return 0
 
     if args.delete:
         if db.delete_zones(args.delete):
@@ -97,9 +108,20 @@ def cmd_zones(args):
             return 1
         zones = json.loads(template['zones_json'])
         zones['power'] = power_zones_from_ftp(args.set_ftp)
+
+        birthdate = db.get_state('birthdate')
+        if birthdate and zones.get('heart_rate'):
+            ratio = (hr_max_for_age(age_on(birthdate, args.effective_from))
+                     / hr_max_for_age(age_on(birthdate, template['effective_from'])))
+            zones['heart_rate'] = scale_hr_zones(zones['heart_rate'], ratio)
+            hr_note = (f"HR zones scaled from version {template['id']} "
+                       f"by age (x{ratio:.4f})")
+        else:
+            hr_note = f"HR zones copied from version {template['id']}"
+
         db.seed_zones(args.effective_from, zones, estimate_ftp(zones))
         print(f"Seeded zones effective {args.effective_from} with FTP "
-              f"{args.set_ftp} W (HR zones copied from version {template['id']})")
+              f"{args.set_ftp} W ({hr_note})")
         print("Run 'python -m stravaclient recompute' to re-derive TSS/zone "
               "times with the new history.")
         return 0
@@ -174,6 +196,9 @@ def main(argv=None):
                    help='date the FTP took effect (required with --set-ftp)')
     p.add_argument('--delete', type=int, default=None, metavar='ID',
                    help='delete a zones version by id')
+    p.add_argument('--set-birthdate', default=None, metavar='YYYY-MM-DD',
+                   help='store birthdate for age-based max HR '
+                        '(205.8 - 0.61 * age); used by TRIMP and zone seeding')
     p.set_defaults(func=cmd_zones)
 
     p = sub.add_parser('recompute', help='recompute derived metrics for all activities')

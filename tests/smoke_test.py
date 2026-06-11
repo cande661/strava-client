@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stravaclient.db import Database
 from stravaclient.metrics import (compute_activity_metrics, estimate_ftp,
-                                  power_zones_from_ftp)
+                                  power_zones_from_ftp, hr_max_for_age,
+                                  age_on, scale_hr_zones)
 from stravaclient.trends import compute_trends
 
 ZONES = {
@@ -135,6 +136,27 @@ def main():
     built_276 = power_zones_from_ftp(276)['zones']
     assert [z['max'] for z in built_276] == [152, 207, 248, 290, 331, 414, -1]
     assert [z['min'] for z in built_276][:3] == [0, 153, 208]
+
+    # Age-based max HR: formula, age math, and HR zone scaling
+    assert abs(hr_max_for_age(40) - 181.4) < 0.01
+    assert abs(age_on('1986-06-15', '2026-06-15') - 40.0) < 0.01
+    scaled = scale_hr_zones(ZONES['heart_rate'], 0.95)
+    assert scaled['zones'][0]['min'] == 0          # zone 1 anchored at 0
+    assert scaled['zones'][-1]['max'] == -1        # top zone open-ended
+    assert scaled['zones'][1]['max'] == round(145 * 0.95)
+    for i in range(1, 5):                          # contiguity preserved
+        assert scaled['zones'][i]['min'] == scaled['zones'][i - 1]['max']
+
+    # Explicit (lower) hr_max increases TRIMP vs the zone-5 estimate
+    activity = db.get_activity(1001)
+    m_default = compute_activity_metrics(activity, db.get_streams(1001),
+                                         db.get_laps(1001), zones_row)
+    m_formula = compute_activity_metrics(activity, db.get_streams(1001),
+                                         db.get_laps(1001), zones_row,
+                                         hr_max=181.0)
+    assert m_formula['trimp'] > m_default['trimp'], (m_formula, m_default)
+    # Power-side metrics are unaffected by hr_max
+    assert m_formula['tss'] == m_default['tss']
 
     # Seeded historical zones are selected by activity date
     old_zones = {'heart_rate': ZONES['heart_rate'],

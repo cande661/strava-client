@@ -6,10 +6,38 @@ numbers in the database match what main.py prints for a single activity.
 
 import json
 import sqlite3
+from datetime import date
 from typing import Dict, Optional
 
 from zone_analyzer import ZoneAnalyzer
 from workout_detector import WorkoutDetector
+
+
+def hr_max_for_age(age_years: float) -> float:
+    """Athlete's preferred max-HR estimate: 205.8 - 0.61 * age."""
+    return 205.8 - 0.61 * age_years
+
+
+def age_on(birthdate: str, on_date: str) -> float:
+    """Age in years (fractional) on a given ISO date."""
+    born = date.fromisoformat(birthdate[:10])
+    when = date.fromisoformat(on_date[:10])
+    return (when - born).days / 365.25
+
+
+def scale_hr_zones(hr_block: Dict, ratio: float) -> Dict:
+    """Scale HR zone boundaries by a max-HR ratio, preserving the zone
+    scheme. Zone 1 stays anchored at 0, the top zone stays open-ended, and
+    contiguity (each min == previous max) is rebuilt after rounding."""
+    zones = []
+    for z in hr_block.get('zones', []):
+        zones.append({
+            'min': 0 if z['min'] == 0 else round(z['min'] * ratio),
+            'max': -1 if z['max'] == -1 else round(z['max'] * ratio),
+        })
+    for i in range(1, len(zones)):
+        zones[i]['min'] = zones[i - 1]['max']
+    return {**hr_block, 'zones': zones}
 
 
 # Coggan zone upper bounds as a fraction of FTP, matching how Strava
@@ -45,7 +73,8 @@ def estimate_ftp(zones: Dict) -> Optional[int]:
 
 
 def compute_activity_metrics(activity: sqlite3.Row, streams: Dict,
-                             laps: list, zones_row: sqlite3.Row) -> Dict:
+                             laps: list, zones_row: sqlite3.Row,
+                             hr_max: Optional[float] = None) -> Dict:
     """Compute derived metrics for one activity.
 
     Args:
@@ -53,6 +82,8 @@ def compute_activity_metrics(activity: sqlite3.Row, streams: Dict,
         streams: {stream_type: [values]} as stored in the streams table
         laps: list of lap dicts
         zones_row: athlete_zones row in effect on the activity date
+        hr_max: explicit max HR for TRIMP (e.g. age-based); when None,
+            falls back to ZoneAnalyzer's zone-5 estimate
 
     Returns:
         Dict matching Database.save_derived_metrics(); values are None where
@@ -83,7 +114,8 @@ def compute_activity_metrics(activity: sqlite3.Row, streams: Dict,
     }
 
     if hr_stream and time_stream:
-        metrics['trimp'] = analyzer.calculate_trimp(hr_stream, time_stream)
+        metrics['trimp'] = analyzer.calculate_trimp(hr_stream, time_stream,
+                                                    hr_max=hr_max)
         metrics['hr_zone_times'] = analyzer.analyze_hr_zones(time_stream, hr_stream)
 
     if has_power_meter and power_stream and time_stream:
