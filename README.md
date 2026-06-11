@@ -1,0 +1,130 @@
+# Strava Activity Analyzer
+
+A Python tool that fetches your latest Strava cycling activity and provides detailed analysis including:
+
+- Time spent in power zones and heart rate zones (with low/medium/high subzones)
+- Workout type detection based on lap structure
+- Detailed lap-by-lap breakdown
+
+## Features
+
+- **Automatic OAuth token refresh**: Keeps your access tokens up to date
+- **Detailed zone analysis**: Splits each of the 7 power zones and 5 HR zones into low/medium/high ranges
+- **Smart workout detection**: Identifies structured workouts like "3 x 15 minutes of Sweet Spot with 5 minute recovery"
+- **Clean console output**: Easy-to-read formatted analysis
+
+## Setup
+
+### 1. Install Dependencies
+
+```bash
+cd /Users/collin/Projects/strava-client
+pip install -r requirements.txt
+```
+
+### 2. Create Configuration File
+
+Copy the example config and add your Strava credentials:
+
+```bash
+cp config.json.example config.json
+```
+
+Edit `config.json` with your Strava OAuth credentials:
+
+```json
+{
+  "client_id": "YOUR_CLIENT_ID",
+  "client_secret": "YOUR_CLIENT_SECRET",
+  "access_token": "YOUR_ACCESS_TOKEN",
+  "refresh_token": "YOUR_REFRESH_TOKEN",
+  "expires_at": 0
+}
+```
+
+You can get these credentials from your Strava API application settings at https://www.strava.com/settings/api
+
+**Important:** When authorizing your application, make sure to request these OAuth scopes:
+- `activity:read_all` - Required to read your activities
+- `profile:read_all` - Required to read your athlete zones (power/HR zones)
+
+### 3. Run the Analyzer
+
+**Analyze your latest activity:**
+```bash
+python main.py
+```
+
+**Analyze a specific activity by ID:**
+```bash
+python main.py --activity=17464283022
+# or
+python main.py --id=17464283022
+```
+
+You can find the activity ID in the Strava URL (e.g., `https://www.strava.com/activities/17464283022`)
+
+### Debug Mode (Development)
+
+For faster iteration during development, you can cache activity data locally:
+
+```bash
+# Save activity data to debug_activity.json
+python main.py --save
+
+# Use cached data (skips API calls)
+python main.py --debug
+# or
+python main.py --cached
+
+# Force refresh cached data
+python main.py --refresh
+```
+
+This is useful when testing analysis logic changes without hitting the Strava API repeatedly.
+
+## Output Example
+
+The script will display:
+
+1. **Activity Summary**: Name, type, date, distance, time, avg power/HR
+2. **Power Zone Analysis**: Time spent in each power zone (Active Recovery through Neuromuscular) broken down by low/medium/high subzones
+3. **Heart Rate Zone Analysis**: Time spent in each HR zone (1-5) broken down by subzones
+4. **Workout Analysis**: Detected workout type (e.g., "15 minute warm up, 3 x 15 minutes of Sweet Spot with 5 minute recovery between, and 10 minute cool down")
+5. **Lap Breakdown**: Table showing duration, distance, avg power, avg HR, and zone for each lap
+
+## Power Zones
+
+The analyzer uses the standard 7-zone power model:
+
+1. Active Recovery (< 55% FTP)
+2. Endurance (55-75% FTP)
+3. Tempo (75-90% FTP)
+4. Threshold (90-105% FTP)
+5. VO2max (105-120% FTP)
+6. Anaerobic (120-150% FTP)
+7. Neuromuscular (> 150% FTP)
+
+Each zone is further divided into Low, Medium, and High ranges.
+
+## Requirements
+
+- Python 3.6+
+- Valid Strava OAuth tokens
+- Activities with power meter and/or heart rate data
+
+## Files
+
+- `main.py`: Entry point script
+- `strava_client.py`: Strava API client with authentication
+- `zone_analyzer.py`: Zone calculation and time analysis
+- `workout_detector.py`: Workout pattern detection from laps
+- `config.json`: Your Strava credentials (not tracked in git)
+- `requirements.txt`: Python dependencies
+
+## Notes
+
+- The script only analyzes your most recent activity
+- Both power and heart rate data are optional (the script will skip analysis for missing data types)
+- Token refresh is automatic - your `config.json` will be updated with new tokens as needed
+- FTP is estimated from your Zone 4 (Threshold) lower bound from Strava zones
