@@ -70,6 +70,69 @@ def cmd_trends(args):
     return 0
 
 
+def _fmt_hms(seconds):
+    if not seconds:
+        return '-'
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def cmd_list(args):
+    from datetime import date, timedelta
+
+    db = Database(args.db)
+    since = args.since
+    if not since and args.days:
+        since = (date.today() - timedelta(days=args.days)).isoformat()
+    commutes = True if args.commutes_only else (False if args.no_commutes else None)
+
+    rows = db.list_activities_rows(since=since, sport=args.sport,
+                                   commutes=commutes, limit=args.limit)
+    if not rows:
+        print("No activities found for the given filters.")
+        return 0
+
+    print(f"{'Date':<11} {'Name':<34} {'Sport':<12} {'Miles':>6} {'Time':>8} "
+          f"{'Power':>7} {'HR':>4} {'TSS':>6} {'TRIMP':>6} Flags")
+    print('-' * 109)
+    total_m = total_s = total_tss = total_trimp = 0.0
+    for r in rows:
+        name = (r['name'] or '')[:34]
+        miles = (r['distance_m'] or 0) / 1609.34
+        # NP when computed; otherwise average watts, ~ marks estimated power
+        if r['normalized_power']:
+            power = f"{r['normalized_power']}np"
+        elif r['average_watts']:
+            power = f"{r['average_watts']:.0f}{'' if r['device_watts'] else '~'}"
+        else:
+            power = '-'
+        hr = f"{r['average_heartrate']:.0f}" if r['average_heartrate'] else '-'
+        tss = f"{r['tss']:.0f}" if r['tss'] else '-'
+        trimp = f"{r['trimp']:.0f}" if r['trimp'] else '-'
+        flags = ''.join([
+            'C' if r['commute'] else '',
+            'T' if r['trainer'] else '',
+            'W' if r['workout_type'] in (3, 12) else '',
+            'R' if r['workout_type'] in (1, 11) else '',
+        ])
+        sport_name = (r['sport_type'] or r['type'] or '')[:12]
+        print(f"{(r['start_date_local'] or '')[:10]:<11} {name:<34} "
+              f"{sport_name:<12} {miles:>6.1f} "
+              f"{_fmt_hms(r['moving_time_s']):>8} {power:>7} {hr:>4} "
+              f"{tss:>6} {trimp:>6} {flags}")
+        total_m += miles
+        total_s += r['moving_time_s'] or 0
+        total_tss += r['tss'] or 0
+        total_trimp += r['trimp'] or 0
+
+    print('-' * 109)
+    print(f"{len(rows)} activities, {total_m:.1f} mi, {_fmt_hms(total_s)} moving"
+          + (f", {total_tss:.0f} TSS" if total_tss else "")
+          + (f", {total_trimp:.0f} TRIMP" if total_trimp else ""))
+    return 0
+
+
 def cmd_zones(args):
     import json
     from datetime import date
@@ -170,6 +233,21 @@ def main(argv=None):
 
     p = sub.add_parser('status', help='show database status')
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser('list', help='list activities as a table')
+    p.add_argument('--days', type=int, default=30, metavar='N',
+                   help='show the last N days (default: 30)')
+    p.add_argument('--since', default=None, metavar='YYYY-MM-DD',
+                   help='explicit start date (overrides --days)')
+    p.add_argument('--sport', default=None,
+                   help="filter by sport type (e.g. 'Ride')")
+    p.add_argument('--limit', type=int, default=None, metavar='N',
+                   help='max rows to show')
+    p.add_argument('--commutes-only', action='store_true',
+                   help='only commute-tagged activities')
+    p.add_argument('--no-commutes', action='store_true',
+                   help='exclude commute-tagged activities')
+    p.set_defaults(func=cmd_list)
 
     p = sub.add_parser('trends', help='aggregate metrics over time')
     p.add_argument('--metric', default='miles', choices=sorted(METRICS),

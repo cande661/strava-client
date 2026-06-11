@@ -113,6 +113,11 @@ python -m stravaclient sync --no-enrich
 # Replication progress and database contents
 python -m stravaclient status
 
+# Activity table (last 30 days by default; filters: --since, --sport,
+# --commutes-only / --no-commutes, --limit)
+python -m stravaclient list
+python -m stravaclient list --days 90 --sport Ride --no-commutes
+
 # Trends
 python -m stravaclient trends --metric miles --by week --last 12
 python -m stravaclient trends --metric tss --by month --since 2026-01-01

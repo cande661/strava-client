@@ -375,6 +375,32 @@ class Database:
         query += " ORDER BY a.start_date_local"
         return self.conn.execute(query, params).fetchall()
 
+    def list_activities_rows(self, since: Optional[str] = None,
+                             sport: Optional[str] = None,
+                             commutes: Optional[bool] = None,
+                             limit: Optional[int] = None) -> List[sqlite3.Row]:
+        """Activity rows (newest first) joined with derived metrics, for
+        table-style listings."""
+        query = ("SELECT a.*, d.tss, d.trimp, d.normalized_power, "
+                 "d.workout_description FROM activities a "
+                 "LEFT JOIN derived_metrics d ON d.activity_id = a.id WHERE 1=1")
+        params: List = []
+        if since:
+            query += " AND a.start_date_local >= ?"
+            params.append(since)
+        if sport:
+            query += " AND (a.sport_type = ? OR a.type = ?)"
+            params.extend([sport, sport])
+        if commutes is True:
+            query += " AND a.commute = 1"
+        elif commutes is False:
+            query += " AND (a.commute IS NULL OR a.commute = 0)"
+        query += " ORDER BY a.start_date_local DESC"
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        return self.conn.execute(query, params).fetchall()
+
     def status(self) -> Dict:
         counts = {}
         q = self.conn.execute
