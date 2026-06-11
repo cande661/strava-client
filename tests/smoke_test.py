@@ -9,7 +9,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stravaclient.db import Database
-from stravaclient.metrics import compute_activity_metrics, estimate_ftp
+from stravaclient.metrics import (compute_activity_metrics, estimate_ftp,
+                                  power_zones_from_ftp)
 from stravaclient.trends import compute_trends
 
 ZONES = {
@@ -123,6 +124,27 @@ def main():
     monthly_tss = compute_trends(db, metric='tss', by='month')
     assert len(monthly_tss) == 1, monthly_tss
     assert abs(monthly_tss[0]['value'] - metrics['tss']) < 0.01, monthly_tss
+
+    # Zones from FTP round-trip through the estimator, matching Strava's
+    # observed boundary convention (min = prev max + 1, open-ended top)
+    for ftp_in in (200, 250, 276, 320):
+        built = {'heart_rate': ZONES['heart_rate'],
+                 'power': power_zones_from_ftp(ftp_in)}
+        ftp_out = estimate_ftp(built)
+        assert abs(ftp_out - ftp_in) <= 1, (ftp_in, ftp_out)
+    built_276 = power_zones_from_ftp(276)['zones']
+    assert [z['max'] for z in built_276] == [152, 207, 248, 290, 331, 414, -1]
+    assert [z['min'] for z in built_276][:3] == [0, 153, 208]
+
+    # Seeded historical zones are selected by activity date
+    old_zones = {'heart_rate': ZONES['heart_rate'],
+                 'power': power_zones_from_ftp(220)}
+    db.seed_zones('2020-01-01', old_zones, estimate_ftp(old_zones))
+    assert db.zones_for_date('2021-06-15')['ftp_estimate'] == estimate_ftp(old_zones)
+    # Activities after the current (observed) version still get the new zones
+    assert db.zones_for_date('2027-01-01')['ftp_estimate'] == ftp
+    # Activities before all known versions fall back to the earliest
+    assert db.zones_for_date('2016-01-01')['ftp_estimate'] == estimate_ftp(old_zones)
 
     # Enrichment bookkeeping: 1001 is done, 1002/1003 still pending
     pending = db.activities_needing_enrichment()

@@ -311,6 +311,16 @@ class Database:
             (effective_from, json.dumps(zones, sort_keys=True), ftp_estimate, _now_iso()))
         self.conn.commit()
 
+    def list_zones(self) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM athlete_zones ORDER BY effective_from, id").fetchall()
+
+    def delete_zones(self, zones_id: int) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM athlete_zones WHERE id = ?", (zones_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def zones_for_date(self, date_iso: str) -> Optional[sqlite3.Row]:
         """Zones in effect on a given date: latest row at or before it,
         falling back to the earliest known row for older activities."""

@@ -70,6 +70,53 @@ def cmd_trends(args):
     return 0
 
 
+def cmd_zones(args):
+    import json
+    from .metrics import power_zones_from_ftp, estimate_ftp
+
+    db = Database(args.db)
+
+    if args.delete:
+        if db.delete_zones(args.delete):
+            print(f"Deleted zones version {args.delete}")
+        else:
+            print(f"No zones version with id {args.delete}")
+            return 1
+        return 0
+
+    if args.set_ftp:
+        if not args.effective_from:
+            print("--from YYYY-MM-DD is required with --set-ftp")
+            return 1
+        # Reuse HR zones from whatever version is in effect on that date
+        # (HR zones change rarely; FTP is what moves).
+        template = db.zones_for_date(args.effective_from)
+        if not template:
+            print("No zones in the database yet — run a sync first so there "
+                  "is a current version to copy heart rate zones from.")
+            return 1
+        zones = json.loads(template['zones_json'])
+        zones['power'] = power_zones_from_ftp(args.set_ftp)
+        db.seed_zones(args.effective_from, zones, estimate_ftp(zones))
+        print(f"Seeded zones effective {args.effective_from} with FTP "
+              f"{args.set_ftp} W (HR zones copied from version {template['id']})")
+        print("Run 'python -m stravaclient recompute' to re-derive TSS/zone "
+              "times with the new history.")
+        return 0
+
+    rows = db.list_zones()
+    if not rows:
+        print("No zones recorded yet — run a sync first.")
+        return 0
+    print(f"{'id':>4}  {'effective from':<15} {'FTP':>5}  source")
+    for row in rows:
+        source = 'observed' if row['observed_at'][:10] == row['effective_from'] \
+            else 'seeded'
+        print(f"{row['id']:>4}  {row['effective_from']:<15} "
+              f"{row['ftp_estimate'] or '?':>5}  {source}")
+    return 0
+
+
 def cmd_recompute(args):
     from .sync import SyncEngine
 
@@ -118,6 +165,16 @@ def main(argv=None):
     p.add_argument('--no-commutes', action='store_true',
                    help='exclude commute-tagged activities')
     p.set_defaults(func=cmd_trends)
+
+    p = sub.add_parser('zones', help='list or seed athlete zone history')
+    p.add_argument('--set-ftp', type=int, default=None, metavar='WATTS',
+                   help='seed a historical FTP (builds Strava-style power zones)')
+    p.add_argument('--from', dest='effective_from', default=None,
+                   metavar='YYYY-MM-DD',
+                   help='date the FTP took effect (required with --set-ftp)')
+    p.add_argument('--delete', type=int, default=None, metavar='ID',
+                   help='delete a zones version by id')
+    p.set_defaults(func=cmd_zones)
 
     p = sub.add_parser('recompute', help='recompute derived metrics for all activities')
     p.set_defaults(func=cmd_recompute)

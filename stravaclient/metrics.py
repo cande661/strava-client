@@ -12,6 +12,29 @@ from zone_analyzer import ZoneAnalyzer
 from workout_detector import WorkoutDetector
 
 
+# Coggan zone upper bounds as a fraction of FTP, matching how Strava
+# derives power zones from FTP (verified against live /athlete/zones data).
+_POWER_ZONE_CEILINGS = (0.55, 0.75, 0.90, 1.05, 1.20, 1.50)
+
+
+def power_zones_from_ftp(ftp: int) -> Dict:
+    """Build a Strava-style power zones block from an FTP value.
+
+    Produces the same structure as /athlete/zones: seven zones, each min
+    one watt above the previous max, last zone open-ended (max = -1).
+    estimate_ftp() round-trips this back to the input FTP.
+    """
+    maxes = [round(ftp * pct) for pct in _POWER_ZONE_CEILINGS]
+    zones = []
+    prev_max = None
+    for zone_max in maxes:
+        zones.append({'min': 0 if prev_max is None else prev_max + 1,
+                      'max': zone_max})
+        prev_max = zone_max
+    zones.append({'min': prev_max + 1, 'max': -1})
+    return {'zones': zones}
+
+
 def estimate_ftp(zones: Dict) -> Optional[int]:
     """Estimate FTP from a /athlete/zones response via WorkoutDetector's
     zone-4 midpoint logic."""

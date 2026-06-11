@@ -131,8 +131,20 @@ message when the daily quota is reached.
 
 **Zone history:** Strava only exposes your *current* zones, so the database
 versions them over time (`athlete_zones` table) and computes each activity's
-metrics with the zones in effect on its date. Past FTP changes can be seeded
-manually with `Database.seed_zones()` so historical TSS uses the right FTP.
+metrics with the zones in effect on its date. Seed past FTP changes so
+historical TSS uses the right FTP:
+
+```bash
+python -m stravaclient zones                              # list versions
+python -m stravaclient zones --set-ftp 250 --from 2022-03-15
+python -m stravaclient zones --delete 3                   # undo a mistake
+python -m stravaclient recompute                          # re-derive metrics
+```
+
+Each `--set-ftp` builds Strava-style power zones (55/75/90/105/120/150% of
+FTP) effective from that date until the next version; HR zones are copied
+from the nearest existing version. Activities older than the earliest version
+fall back to it.
 
 ## Power Zones
 
