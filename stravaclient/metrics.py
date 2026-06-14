@@ -105,6 +105,33 @@ def estimate_ftp(zones: Dict) -> Optional[int]:
     return WorkoutDetector(analyzer.power_zones).ftp
 
 
+def compute_power_metrics(analyzer: ZoneAnalyzer, power_stream: list,
+                          moving_time_s: Optional[int]) -> Dict:
+    """Normalized power, intensity factor, and TSS for a power stream.
+
+    Shared by the database sync and main.py so the formula lives in one place.
+    FTP is taken from the analyzer's power zones (WorkoutDetector's zone-4
+    estimate). Returns a dict with normalized_power/intensity_factor/tss/
+    ftp_used, each None when not computable.
+
+        TSS = duration_s * NP * IF / (FTP * 3600) * 100,  IF = NP / FTP
+    """
+    result = {'normalized_power': None, 'intensity_factor': None,
+              'tss': None, 'ftp_used': None}
+    if not (analyzer.power_zones and power_stream):
+        return result
+    np = analyzer.calculate_normalized_power(power_stream)
+    ftp = WorkoutDetector(analyzer.power_zones).ftp
+    if np and ftp:
+        intensity = np / ftp
+        duration_s = moving_time_s or len(power_stream)
+        result['normalized_power'] = np
+        result['intensity_factor'] = round(intensity, 3)
+        result['tss'] = round(duration_s * np * intensity / (ftp * 3600) * 100, 1)
+        result['ftp_used'] = ftp
+    return result
+
+
 def compute_activity_metrics(activity: sqlite3.Row, streams: Dict,
                              laps: list, zones_row: sqlite3.Row,
                              hr_max: Optional[float] = None) -> Dict:
@@ -155,16 +182,9 @@ def compute_activity_metrics(activity: sqlite3.Row, streams: Dict,
         metrics['power_zone_times'] = analyzer.analyze_power_zones(
             time_stream, power_stream)
 
-        np = analyzer.calculate_normalized_power(power_stream)
-        ftp = WorkoutDetector(analyzer.power_zones).ftp if analyzer.power_zones else None
-        if np and ftp:
-            intensity = np / ftp
-            duration_s = activity['moving_time_s'] or len(power_stream)
-            metrics['normalized_power'] = np
-            metrics['intensity_factor'] = round(intensity, 3)
-            metrics['tss'] = round(
-                duration_s * np * intensity / (ftp * 3600) * 100, 1)
-            metrics['ftp_used'] = ftp
+        power_metrics = compute_power_metrics(
+            analyzer, power_stream, activity['moving_time_s'])
+        metrics.update(power_metrics)
 
         if laps and len(laps) >= 2:
             detector = WorkoutDetector(analyzer.power_zones)

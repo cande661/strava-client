@@ -13,7 +13,7 @@ import os
 from strava_client import StravaClient
 from zone_analyzer import ZoneAnalyzer
 from workout_detector import WorkoutDetector
-from stravaclient.metrics import hr_max_for_activity
+from stravaclient.metrics import hr_max_for_activity, compute_power_metrics
 
 
 def print_header(text: str, char: str = "="):
@@ -23,7 +23,8 @@ def print_header(text: str, char: str = "="):
     print(f"{char * 60}\n")
 
 
-def print_activity_summary(activity: dict, trimp: int = None, normalized_power: int = None):
+def print_activity_summary(activity: dict, trimp: int = None, normalized_power: int = None,
+                           intensity_factor: float = None, tss: float = None):
     """Print basic activity information."""
     print_header("Activity Summary")
 
@@ -66,12 +67,18 @@ def print_activity_summary(activity: dict, trimp: int = None, normalized_power: 
     if normalized_power is not None:
         print(f"NP:       {normalized_power} W")
 
+    if intensity_factor is not None:
+        print(f"IF:       {intensity_factor:.2f}")
+
     avg_hr = activity.get('average_heartrate')
     if avg_hr:
         print(f"Avg HR:    {avg_hr:.0f} bpm")
 
     if trimp is not None:
         print(f"TRIMP:     {trimp}")
+
+    if tss is not None:
+        print(f"TSS:       {tss:.0f}")
 
 
 def print_zone_analysis(zone_data: dict, title: str, zone_analyzer: 'ZoneAnalyzer', is_power: bool = True):
@@ -354,10 +361,20 @@ def main():
         trimp = zone_analyzer.calculate_trimp(
             hr_stream, time_stream, hr_max=hr_max) if hr_stream else None
         has_power_meter = activity.get('device_watts', False)
-        normalized_power = zone_analyzer.calculate_normalized_power(power_stream) if has_power_meter and power_stream else None
+        # NP, IF, and TSS via the shared helper so these match the database.
+        if has_power_meter and power_stream:
+            power_metrics = compute_power_metrics(
+                zone_analyzer, power_stream, activity.get('moving_time'))
+        else:
+            power_metrics = {'normalized_power': None, 'intensity_factor': None,
+                             'tss': None, 'ftp_used': None}
 
         # Print basic activity info
-        print_activity_summary(activity, trimp=trimp, normalized_power=normalized_power)
+        print_activity_summary(
+            activity, trimp=trimp,
+            normalized_power=power_metrics['normalized_power'],
+            intensity_factor=power_metrics['intensity_factor'],
+            tss=power_metrics['tss'])
 
         if power_stream:
             power_zone_data = zone_analyzer.analyze_power_zones(time_stream, power_stream)
