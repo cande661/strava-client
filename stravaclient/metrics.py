@@ -5,12 +5,15 @@ numbers in the database match what main.py prints for a single activity.
 """
 
 import json
+import os
 import sqlite3
 from datetime import date
 from typing import Dict, Optional
 
 from zone_analyzer import ZoneAnalyzer
 from workout_detector import WorkoutDetector
+
+from .db import DEFAULT_DB_PATH
 
 
 def hr_max_for_age(age_years: float) -> float:
@@ -23,6 +26,36 @@ def age_on(birthdate: str, on_date: str) -> float:
     born = date.fromisoformat(birthdate[:10])
     when = date.fromisoformat(on_date[:10])
     return (when - born).days / 365.25
+
+
+def stored_birthdate(db_path: str = DEFAULT_DB_PATH) -> Optional[str]:
+    """Read the athlete birthdate from sync_state without creating the DB.
+
+    Returns None if the database, table, or value is absent so callers can
+    fall back to the zone-based HRmax estimate.
+    """
+    if not os.path.exists(db_path):
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM sync_state WHERE key = 'birthdate'").fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+
+
+def hr_max_for_activity(activity: Dict,
+                        db_path: str = DEFAULT_DB_PATH) -> Optional[float]:
+    """Age-based HRmax for an activity dict's date, or None when no birthdate
+    is stored (callers then fall back to the zone-based estimate)."""
+    birthdate = stored_birthdate(db_path)
+    date_str = activity.get('start_date_local') or activity.get('start_date')
+    if birthdate and date_str:
+        return hr_max_for_age(age_on(birthdate, date_str))
+    return None
 
 
 def scale_hr_zones(hr_block: Dict, ratio: float) -> Dict:

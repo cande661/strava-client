@@ -13,6 +13,7 @@ import os
 from strava_client import StravaClient
 from zone_analyzer import ZoneAnalyzer
 from workout_detector import WorkoutDetector
+from stravaclient.metrics import hr_max_for_activity
 
 
 def print_header(text: str, char: str = "="):
@@ -346,8 +347,12 @@ def main():
         hr_stream = streams.get('heartrate', {}).get('data', [])
         power_stream = streams.get('watts', {}).get('data', [])
 
-        # Calculate summary metrics before printing
-        trimp = zone_analyzer.calculate_trimp(hr_stream, time_stream) if hr_stream else None
+        # Calculate summary metrics before printing. Use the age-based HRmax
+        # (from the stored birthdate) when available so this matches the TRIMP
+        # in the local database; otherwise fall back to the zone-5 estimate.
+        hr_max = hr_max_for_activity(activity)
+        trimp = zone_analyzer.calculate_trimp(
+            hr_stream, time_stream, hr_max=hr_max) if hr_stream else None
         has_power_meter = activity.get('device_watts', False)
         normalized_power = zone_analyzer.calculate_normalized_power(power_stream) if has_power_meter and power_stream else None
 
