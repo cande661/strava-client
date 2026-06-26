@@ -4,6 +4,7 @@ Run from the project root (config.json and data/strava.db are resolved
 relative to the working directory):
 
     python -m stravaclient sync [--full] [--limit N] [--no-enrich]
+    python -m stravaclient reenrich ID [ID ...]
     python -m stravaclient status
     python -m stravaclient trends --metric miles --by week --since 2026-01-01
     python -m stravaclient recompute
@@ -26,6 +27,18 @@ def cmd_sync(args):
     completed = engine.run(full=args.full, limit=args.limit,
                            skip_enrich=args.no_enrich)
     return 0 if completed else 2
+
+
+def cmd_reenrich(args):
+    from strava_client import StravaClient
+    from .sync import SyncEngine
+
+    db = Database(args.db)
+    client = StravaClient(args.config)
+    engine = SyncEngine(db, client)
+    n = engine.reenrich(args.activity_ids)
+    print(f"Re-enriched {n} activities ({engine.requests_made} API requests).")
+    return 0
 
 
 def cmd_status(args):
@@ -230,6 +243,13 @@ def main(argv=None):
     p.add_argument('--no-enrich', action='store_true',
                    help='only sync the activity list, skip detail/streams/laps')
     p.set_defaults(func=cmd_sync)
+
+    p = sub.add_parser('reenrich',
+                       help='force re-fetch of specific activities by id '
+                            '(use after editing them on Strava)')
+    p.add_argument('activity_ids', nargs='+', type=int, metavar='ID',
+                   help='Strava activity id(s) to clear and re-fetch')
+    p.set_defaults(func=cmd_reenrich)
 
     p = sub.add_parser('status', help='show database status')
     p.set_defaults(func=cmd_status)

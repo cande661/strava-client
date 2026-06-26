@@ -149,38 +149,62 @@ class SyncEngine:
 
         done = 0
         for row in pending:
-            activity_id = row['id']
-            label = f"{(row['start_date_local'] or '')[:10]} {row['name'] or activity_id}"
-
-            if row['detail_fetched_at'] is None:
-                detail = self._call(self.client.get_activity, activity_id)
-                self.db.save_activity_detail(activity_id, detail)
-
-            if row['streams_fetched_at'] is None:
-                if row['manual']:
-                    # Manual entries have no streams; mark as fetched-empty.
-                    self.db.save_streams(activity_id, {})
-                else:
-                    try:
-                        streams = self._call(self.client.get_activity_streams,
-                                             activity_id, STREAM_KEYS)
-                        self.db.save_streams(activity_id, streams)
-                    except requests.exceptions.HTTPError as e:
-                        if e.response is not None and e.response.status_code == 404:
-                            self.db.save_streams(activity_id, {})
-                        else:
-                            raise
-
-            if row['laps_fetched_at'] is None:
-                if row['manual']:
-                    self.db.save_laps(activity_id, [])
-                else:
-                    laps = self._call(self.client.get_activity_laps, activity_id)
-                    self.db.save_laps(activity_id, laps)
-
+            self._enrich_row(row)
             done += 1
+            label = f"{(row['start_date_local'] or '')[:10]} {row['name'] or row['id']}"
             print(f"  [{done}/{len(pending)}] {label}")
 
+        return done
+
+    def _enrich_row(self, row):
+        """Fetch whichever of detail/streams/laps the row is still missing."""
+        activity_id = row['id']
+
+        if row['detail_fetched_at'] is None:
+            detail = self._call(self.client.get_activity, activity_id)
+            self.db.save_activity_detail(activity_id, detail)
+
+        if row['streams_fetched_at'] is None:
+            if row['manual']:
+                # Manual entries have no streams; mark as fetched-empty.
+                self.db.save_streams(activity_id, {})
+            else:
+                try:
+                    streams = self._call(self.client.get_activity_streams,
+                                         activity_id, STREAM_KEYS)
+                    self.db.save_streams(activity_id, streams)
+                except requests.exceptions.HTTPError as e:
+                    if e.response is not None and e.response.status_code == 404:
+                        self.db.save_streams(activity_id, {})
+                    else:
+                        raise
+
+        if row['laps_fetched_at'] is None:
+            if row['manual']:
+                self.db.save_laps(activity_id, [])
+            else:
+                laps = self._call(self.client.get_activity_laps, activity_id)
+                self.db.save_laps(activity_id, laps)
+
+    def reenrich(self, activity_ids: List[int]) -> int:
+        """Force re-fetch of specific activities (e.g. after editing them on
+        Strava), regardless of newest-first ordering. Clears each one's stored
+        data, re-fetches it, then recomputes metrics. Returns the count done."""
+        done = 0
+        try:
+            for activity_id in activity_ids:
+                if not self.db.mark_for_reenrichment(activity_id):
+                    print(f"  {activity_id}: not in the database, skipping")
+                    continue
+                row = self.db.get_activity(activity_id)
+                self._enrich_row(row)
+                done += 1
+                label = f"{(row['start_date_local'] or '')[:10]} {row['name'] or activity_id}"
+                print(f"  [{done}] re-enriched {label}")
+        except DailyLimitReached:
+            print("\nDaily Strava API quota reached. Progress is saved — run the "
+                  "command again tomorrow (or after midnight UTC) to continue.")
+        self._finish_metrics()
         return done
 
     # -- pass 4: derived metrics -----------------------------------------------

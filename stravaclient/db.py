@@ -269,6 +269,27 @@ class Database:
             "SELECT * FROM activities WHERE streams_fetched_at IS NOT NULL "
             "ORDER BY start_date DESC").fetchall()
 
+    def mark_for_reenrichment(self, activity_id: int) -> bool:
+        """Drop an activity's stored detail/streams/laps/metrics and clear its
+        fetch timestamps so the next enrich re-fetches it from Strava.
+
+        Use after editing an activity on Strava (e.g. cropping GPS points),
+        which the summary upsert otherwise ignores. Returns False if the
+        activity isn't in the database.
+        """
+        if self.get_activity(activity_id) is None:
+            return False
+        self.conn.execute("DELETE FROM streams WHERE activity_id = ?", (activity_id,))
+        self.conn.execute("DELETE FROM laps WHERE activity_id = ?", (activity_id,))
+        self.conn.execute(
+            "DELETE FROM derived_metrics WHERE activity_id = ?", (activity_id,))
+        self.conn.execute(
+            "UPDATE activities SET detail_fetched_at = NULL, "
+            "streams_fetched_at = NULL, laps_fetched_at = NULL, updated_at = ? "
+            "WHERE id = ?", (_now_iso(), activity_id))
+        self.conn.commit()
+        return True
+
     # -- gear ---------------------------------------------------------------
 
     def upsert_gear(self, gear: Dict):
