@@ -173,6 +173,20 @@ def main():
     pending_ids = {r['id'] for r in pending}
     assert pending_ids == {1002, 1003}, pending_ids
 
+    # Re-enrichment clears 1001's stored data so it becomes pending again
+    assert db.mark_for_reenrichment(999999) is False     # unknown id is a no-op
+    assert db.mark_for_reenrichment(1001) is True
+    row = db.get_activity(1001)
+    assert row['detail_fetched_at'] is None, row['detail_fetched_at']
+    assert row['streams_fetched_at'] is None
+    assert row['laps_fetched_at'] is None
+    assert db.get_streams(1001) == {}, "streams not cleared"
+    assert db.get_laps(1001) == [], "laps not cleared"
+    pending_ids = {r['id'] for r in db.activities_needing_enrichment()}
+    assert pending_ids == {1001, 1002, 1003}, pending_ids
+    # Metrics row was dropped; with streams gone it's not (yet) due for metrics
+    assert not any(r['id'] == 1001 for r in db.activities_needing_metrics())
+
     print("All smoke tests passed.")
     return 0
 

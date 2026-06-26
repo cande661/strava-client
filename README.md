@@ -110,6 +110,13 @@ python -m stravaclient sync --limit 50
 # Only refresh the activity list (cheap, ~15 requests for a full history)
 python -m stravaclient sync --no-enrich
 
+# Force re-fetch of specific activities after editing them on Strava
+# (e.g. cropping GPS points). A plain summary re-sync won't notice edits, so
+# this clears the stored detail/streams/laps/metrics and re-fetches them,
+# regardless of the usual newest-first enrichment order.
+python -m stravaclient reenrich 17464283022
+python -m stravaclient reenrich 17464283022 17464283099
+
 # Replication progress and database contents
 python -m stravaclient status
 
