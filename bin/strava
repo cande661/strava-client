@@ -1,0 +1,25 @@
+#!/bin/bash
+# Launcher for the Strava client that uses the project's virtualenv directly,
+# so there's no need to `source venv/bin/activate` first. Runnable from any
+# directory: it cd's into the project so config.json and data/strava.db resolve.
+#
+# Usage:
+#   strava                      # analyze your latest activity (main.py)
+#   strava --activity=12345     # analyze a specific activity
+#   strava sync [--limit N]     # local DB sync / enrichment
+#   strava status | list | trends | zones | recompute | reenrich ...
+set -euo pipefail
+
+PROJECT="/Users/collin/Projects/strava-client"
+PYTHON="$PROJECT/venv/bin/python"
+
+cd "$PROJECT"
+
+case "${1:-}" in
+  sync|status|list|trends|zones|recompute|reenrich)
+    exec "$PYTHON" -m stravaclient "$@"
+    ;;
+  *)
+    exec "$PYTHON" main.py "$@"
+    ;;
+esac
