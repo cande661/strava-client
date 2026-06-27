@@ -1,14 +1,17 @@
 """Sync engine: replicate Strava activities into the local database.
 
-Three passes, each independently resumable:
+Passes, each independently resumable:
   1. Activity list — pages /athlete/activities into summary rows. Incremental
      runs use after= with a 14-day overlap to pick up recent edits.
-  2. Enrichment — per activity, fetch detail + streams + laps (3 requests).
-     Throttled against Strava's read rate limit: sleeps through 15-minute
-     windows, stops cleanly when the daily quota is gone.
-  3. Metrics — compute TRIMP/NP/TSS/zone times for anything with streams.
+  2. Enrichment — per activity, fetch detail + streams + laps (3 requests),
+     then immediately compute its metrics (TRIMP/NP/TSS/zone times) and commit
+     both together. Throttled against Strava's read rate limit: sleeps through
+     15-minute windows, stops cleanly when the daily quota is gone.
 
-Interrupting at any point is safe; the next run picks up where it left off.
+Because metrics are computed inline as each activity is enriched, interrupting
+at any point (Ctrl-C, shutdown, rate-limit wait) leaves every finished activity
+fully processed — never streams without metrics. A final compute_metrics() pass
+acts as a safety net that backfills anything stranded by older runs.
 """
 
 import time
@@ -150,6 +153,10 @@ class SyncEngine:
         done = 0
         for row in pending:
             self._enrich_row(row)
+            # Compute metrics immediately, before moving to the next activity
+            # or waiting on the rate limiter. Streams and metrics are committed
+            # together so an interrupted sync never strands data.
+            self.compute_metrics_for(self.db.get_activity(row['id']))
             done += 1
             label = f"{(row['start_date_local'] or '')[:10]} {row['name'] or row['id']}"
             print(f"  [{done}/{len(pending)}] {label}")
@@ -198,6 +205,7 @@ class SyncEngine:
                     continue
                 row = self.db.get_activity(activity_id)
                 self._enrich_row(row)
+                self.compute_metrics_for(self.db.get_activity(activity_id))
                 done += 1
                 label = f"{(row['start_date_local'] or '')[:10]} {row['name'] or activity_id}"
                 print(f"  [{done}] re-enriched {label}")
@@ -209,25 +217,41 @@ class SyncEngine:
 
     # -- pass 4: derived metrics -----------------------------------------------
 
+    def _birthdate(self):
+        """Cached birthdate lookup (None if unset); read once per run."""
+        if not hasattr(self, '_birthdate_cache'):
+            self._birthdate_cache = self.db.get_state('birthdate')
+        return self._birthdate_cache
+
+    def compute_metrics_for(self, row) -> bool:
+        """Derive and store metrics for one activity from its local streams.
+
+        Returns False (without saving) when no athlete zones cover the
+        activity's date — the caller decides whether to warn or stop.
+        """
+        activity_date = row['start_date_local'] or row['start_date'] or ''
+        zones_row = self.db.zones_for_date(activity_date)
+        if not zones_row:
+            return False
+        hr_max = None
+        birthdate = self._birthdate()
+        if birthdate and activity_date:
+            hr_max = hr_max_for_age(age_on(birthdate, activity_date))
+        streams = self.db.get_streams(row['id'])
+        laps = self.db.get_laps(row['id'])
+        metrics = compute_activity_metrics(row, streams, laps, zones_row,
+                                           hr_max=hr_max)
+        self.db.save_derived_metrics(row['id'], metrics)
+        return True
+
     def compute_metrics(self, recompute: bool = False) -> int:
         rows = (self.db.activities_with_streams() if recompute
                 else self.db.activities_needing_metrics())
-        birthdate = self.db.get_state('birthdate')
         computed = 0
         for row in rows:
-            activity_date = row['start_date_local'] or row['start_date'] or ''
-            zones_row = self.db.zones_for_date(activity_date)
-            if not zones_row:
+            if not self.compute_metrics_for(row):
                 print("  No athlete zones recorded yet; run a sync first.")
                 break
-            hr_max = None
-            if birthdate and activity_date:
-                hr_max = hr_max_for_age(age_on(birthdate, activity_date))
-            streams = self.db.get_streams(row['id'])
-            laps = self.db.get_laps(row['id'])
-            metrics = compute_activity_metrics(row, streams, laps, zones_row,
-                                               hr_max=hr_max)
-            self.db.save_derived_metrics(row['id'], metrics)
             computed += 1
         return computed
 
@@ -260,6 +284,9 @@ class SyncEngine:
         return True
 
     def _finish_metrics(self):
-        print("Computing derived metrics...")
+        # Metrics are normally computed inline during enrichment; this is a
+        # safety net that backfills anything stranded by an older interrupted
+        # run (streams but no metrics). Stays quiet when there's nothing to do.
         n = self.compute_metrics()
-        print(f"  {n} activities computed")
+        if n:
+            print(f"Backfilled metrics for {n} previously un-computed activities")

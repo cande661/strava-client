@@ -187,6 +187,20 @@ def main():
     # Metrics row was dropped; with streams gone it's not (yet) due for metrics
     assert not any(r['id'] == 1001 for r in db.activities_needing_metrics())
 
+    # SyncEngine computes metrics per-activity (the inline-enrichment path),
+    # and the batch compute_metrics() backfills anything still pending.
+    from stravaclient.sync import SyncEngine
+    engine = SyncEngine(db, client=None)          # no API calls in these paths
+    db.save_streams(1001, streams)                # re-supply streams for 1001
+    db.save_laps(1001, laps)
+    assert engine.compute_metrics_for(db.get_activity(1001)) is True
+    np = db.conn.execute(
+        "SELECT normalized_power FROM derived_metrics WHERE activity_id = 1001"
+    ).fetchone()['normalized_power']
+    assert np == 200, np
+    # Now only 1002/1003 lack streams, so nothing else is due for metrics
+    assert engine.compute_metrics() == 0
+
     print("All smoke tests passed.")
     return 0
 
