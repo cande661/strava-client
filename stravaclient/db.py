@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 """
 
+# Strava workout_type codes. 3/12 = structured workout (run/ride), 1/11 = race
+# (run/ride). These drive the W/R flags in listings and the workout-commute
+# filter.
+WORKOUT_TYPE_CODES = (3, 12)
+RACE_TYPE_CODES = (1, 11)
+
 # Summary fields extracted into queryable columns. Maps column -> JSON key.
 _SUMMARY_COLUMNS = {
     'name': 'name',
@@ -399,9 +405,15 @@ class Database:
     def list_activities_rows(self, since: Optional[str] = None,
                              sport: Optional[str] = None,
                              commutes: Optional[bool] = None,
+                             exclude_plain_commutes: bool = False,
                              limit: Optional[int] = None) -> List[sqlite3.Row]:
         """Activity rows (newest first) joined with derived metrics, for
-        table-style listings."""
+        table-style listings.
+
+        exclude_plain_commutes hides commutes that aren't tagged as workouts
+        (keeping workout-tagged commutes), unlike commutes=False which hides
+        every commute.
+        """
         query = ("SELECT a.*, d.tss, d.trimp, d.normalized_power, "
                  "d.workout_description FROM activities a "
                  "LEFT JOIN derived_metrics d ON d.activity_id = a.id WHERE 1=1")
@@ -416,6 +428,11 @@ class Database:
             query += " AND a.commute = 1"
         elif commutes is False:
             query += " AND (a.commute IS NULL OR a.commute = 0)"
+        if exclude_plain_commutes:
+            placeholders = ', '.join('?' for _ in WORKOUT_TYPE_CODES)
+            query += (f" AND (a.commute IS NULL OR a.commute = 0 "
+                      f"OR a.workout_type IN ({placeholders}))")
+            params.extend(WORKOUT_TYPE_CODES)
         query += " ORDER BY a.start_date_local DESC"
         if limit:
             query += " LIMIT ?"
