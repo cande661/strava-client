@@ -13,7 +13,8 @@ relative to the working directory):
 import argparse
 import sys
 
-from .db import Database, DEFAULT_DB_PATH
+from .db import (Database, DEFAULT_DB_PATH,
+                 WORKOUT_TYPE_CODES, RACE_TYPE_CODES)
 from .trends import compute_trends, format_trends, METRICS
 
 
@@ -101,7 +102,9 @@ def cmd_list(args):
     commutes = True if args.commutes_only else (False if args.no_commutes else None)
 
     rows = db.list_activities_rows(since=since, sport=args.sport,
-                                   commutes=commutes, limit=args.limit)
+                                   commutes=commutes,
+                                   exclude_plain_commutes=args.no_plain_commutes,
+                                   limit=args.limit)
     if not rows:
         print("No activities found for the given filters.")
         return 0
@@ -126,8 +129,8 @@ def cmd_list(args):
         flags = ''.join([
             'C' if r['commute'] else '',
             'T' if r['trainer'] else '',
-            'W' if r['workout_type'] in (3, 12) else '',
-            'R' if r['workout_type'] in (1, 11) else '',
+            'W' if r['workout_type'] in WORKOUT_TYPE_CODES else '',
+            'R' if r['workout_type'] in RACE_TYPE_CODES else '',
         ])
         sport_name = (r['sport_type'] or r['type'] or '')[:12]
         print(f"{(r['start_date_local'] or '')[:10]:<11} {name:<34} "
@@ -267,6 +270,9 @@ def main(argv=None):
                    help='only commute-tagged activities')
     p.add_argument('--no-commutes', action='store_true',
                    help='exclude commute-tagged activities')
+    p.add_argument('--no-plain-commutes', action='store_true',
+                   help='exclude commutes that are not workouts (keeps '
+                        'workout-tagged commutes)')
     p.set_defaults(func=cmd_list)
 
     p = sub.add_parser('trends', help='aggregate metrics over time')
