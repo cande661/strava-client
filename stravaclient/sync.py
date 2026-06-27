@@ -14,6 +14,7 @@ fully processed — never streams without metrics. A final compute_metrics() pas
 acts as a safety net that backfills anything stranded by older runs.
 """
 
+import json
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -34,6 +35,20 @@ LIST_OVERLAP_SECONDS = 14 * 86400
 # Stop issuing requests when within this margin of a quota.
 RATE_LIMIT_MARGIN = 3
 
+# Wake this many seconds *after* a window boundary. Strava's 15-min windows are
+# aligned to the UTC quarter-hour, but clock skew and reset-phase jitter mean a
+# tiny cushion can land the probe back in the old window; 30s absorbs that.
+WINDOW_CUSHION_SECONDS = 30
+
+# If a probe still 429s right after a window boundary (woke a touch early),
+# retry after this delay, doubling up to the next boundary, instead of sleeping
+# a whole extra 15-minute window.
+SHORT_BACKOFF_SECONDS = 30
+
+# sync_state key under which the latest rate-limit observation is persisted, so
+# throttling survives across separate sync runs.
+RATE_LIMIT_STATE_KEY = 'rate_limit'
+
 
 class DailyLimitReached(Exception):
     """Daily read quota exhausted; sync should stop and resume tomorrow."""
@@ -45,9 +60,26 @@ def _parse_start_ts(start_date: str) -> float:
 
 
 def _seconds_to_next_window() -> float:
-    """Seconds until the next 15-minute rate-limit window (quarter hour UTC)."""
+    """Seconds until the next 15-minute rate-limit window (quarter hour UTC),
+    plus a cushion so the next request lands safely inside the new window."""
     now = time.time()
-    return (int(now // 900) + 1) * 900 - now + 5
+    return (int(now // 900) + 1) * 900 - now + WINDOW_CUSHION_SECONDS
+
+
+def _age_rate_limit(rl: Optional[dict]) -> Optional[dict]:
+    """Zero out usage counts whose window/day has elapsed since they were
+    observed, so a stale observation from a prior run doesn't over- or
+    under-throttle. Mutates and returns the dict."""
+    if not rl or 'observed_at' not in rl:
+        return rl
+    now = time.time()
+    obs = rl['observed_at']
+    if int(now // 900) != int(obs // 900):
+        rl['short_usage'] = 0          # the 15-min window has rolled over
+    if (datetime.fromtimestamp(now, timezone.utc).date()
+            != datetime.fromtimestamp(obs, timezone.utc).date()):
+        rl['daily_usage'] = 0          # the UTC day has rolled over
+    return rl
 
 
 class SyncEngine:
@@ -55,11 +87,32 @@ class SyncEngine:
         self.db = db
         self.client = client
         self.requests_made = 0
+        self._load_rate_limit()
 
     # -- rate-limit-aware request wrapper ------------------------------------
 
+    def _load_rate_limit(self):
+        """Seed the client's rate-limit view from the last run so the first
+        request is throttled instead of going out blind."""
+        if self.client is None or self.client.rate_limit is not None:
+            return
+        saved = self.db.get_state(RATE_LIMIT_STATE_KEY)
+        if not saved:
+            return
+        try:
+            rl = json.loads(saved)
+        except (ValueError, TypeError):
+            return
+        self.client.rate_limit = _age_rate_limit(rl)
+
+    def _persist_rate_limit(self):
+        """Save the latest rate-limit observation so the next run sees it."""
+        if self.client is not None and self.client.rate_limit:
+            self.db.set_state(RATE_LIMIT_STATE_KEY,
+                              json.dumps(self.client.rate_limit))
+
     def _wait_for_budget(self):
-        rl = self.client.rate_limit
+        rl = _age_rate_limit(self.client.rate_limit)
         if not rl:
             return
         if rl['daily_usage'] >= rl['daily_limit'] - RATE_LIMIT_MARGIN:
@@ -69,22 +122,39 @@ class SyncEngine:
             print(f"  Rate limit window full ({rl['short_usage']}/{rl['short_limit']}), "
                   f"sleeping {wait / 60:.1f} min...")
             time.sleep(wait)
+            # The window has rolled over: optimistically clear the short count
+            # so the next request probes the new window instead of re-sleeping a
+            # whole one. The probe's response headers correct this; if we woke a
+            # touch early, the 429 path below backs off briefly.
+            rl['short_usage'] = 0
 
     def _call(self, fn, *args, **kwargs):
         """Make an API call, sleeping through 15-minute limits and raising
         DailyLimitReached when the daily quota is gone."""
+        backoff = SHORT_BACKOFF_SECONDS
         while True:
             self._wait_for_budget()
             try:
                 result = fn(*args, **kwargs)
                 self.requests_made += 1
+                self._persist_rate_limit()
                 return result
             except RateLimitError as e:
+                self._persist_rate_limit()
                 if e.daily:
                     raise DailyLimitReached() from e
-                wait = _seconds_to_next_window()
-                print(f"  Hit 15-min rate limit, sleeping {wait / 60:.1f} min...")
-                time.sleep(wait)
+                # Either we probed a few seconds early after a boundary, or the
+                # window genuinely filled. Back off briefly and retry rather
+                # than burning a full window; grow the delay up to the next
+                # boundary so a truly-full window still resolves promptly.
+                print(f"  15-min limit still in effect, retrying in {backoff:.0f}s...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, _seconds_to_next_window())
+                # Clear the maxed short count so the retry probes the window
+                # again instead of _wait_for_budget re-sleeping a full one; the
+                # probe's response headers restore the true usage.
+                if self.client.rate_limit:
+                    self.client.rate_limit['short_usage'] = 0
 
     # -- pass 1: athlete context ---------------------------------------------
 
