@@ -113,6 +113,9 @@ class StravaClient:
             self.rate_limit = {
                 'short_usage': short_usage, 'short_limit': short_limit,
                 'daily_usage': daily_usage, 'daily_limit': daily_limit,
+                # Epoch seconds this observation was made, so callers can tell
+                # whether the 15-min window / UTC day has since rolled over.
+                'observed_at': time.time(),
             }
 
     def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict:

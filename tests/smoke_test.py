@@ -5,6 +5,7 @@ Run from the project root: python tests/smoke_test.py
 
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -186,6 +187,52 @@ def main():
     assert pending_ids == {1001, 1002, 1003}, pending_ids
     # Metrics row was dropped; with streams gone it's not (yet) due for metrics
     assert not any(r['id'] == 1001 for r in db.activities_needing_metrics())
+
+    # SyncEngine computes metrics per-activity (the inline-enrichment path),
+    # and the batch compute_metrics() backfills anything still pending.
+    from stravaclient.sync import SyncEngine
+    engine = SyncEngine(db, client=None)          # no API calls in these paths
+    db.save_streams(1001, streams)                # re-supply streams for 1001
+    db.save_laps(1001, laps)
+    assert engine.compute_metrics_for(db.get_activity(1001)) is True
+    np = db.conn.execute(
+        "SELECT normalized_power FROM derived_metrics WHERE activity_id = 1001"
+    ).fetchone()['normalized_power']
+    assert np == 200, np
+    # Now only 1002/1003 lack streams, so nothing else is due for metrics
+    assert engine.compute_metrics() == 0
+
+    # Rate-limit aging: stale counts are zeroed once their window/day rolls over
+    from stravaclient.sync import _age_rate_limit, SyncEngine
+    now = time.time()
+    fresh = _age_rate_limit({'short_usage': 50, 'short_limit': 100,
+                             'daily_usage': 200, 'daily_limit': 1000,
+                             'observed_at': now})
+    assert fresh['short_usage'] == 50 and fresh['daily_usage'] == 200
+    old_window = _age_rate_limit({'short_usage': 99, 'short_limit': 100,
+                                  'daily_usage': 200, 'daily_limit': 1000,
+                                  'observed_at': now - 1000})   # > 15 min ago
+    assert old_window['short_usage'] == 0 and old_window['daily_usage'] == 200
+    old_day = _age_rate_limit({'short_usage': 99, 'short_limit': 100,
+                               'daily_usage': 900, 'daily_limit': 1000,
+                               'observed_at': now - 90000})      # > 1 day ago
+    assert old_day['short_usage'] == 0 and old_day['daily_usage'] == 0
+
+    # Rate-limit state survives across SyncEngine instances (i.e. across runs)
+    class FakeClient:
+        def __init__(self):
+            self.rate_limit = None
+
+    fake = FakeClient()
+    SyncEngine(db, fake)                       # nothing persisted yet -> stays None
+    assert fake.rate_limit is None
+    fake.rate_limit = {'short_usage': 10, 'short_limit': 100,
+                       'daily_usage': 20, 'daily_limit': 1000, 'observed_at': now}
+    SyncEngine(db, fake)._persist_rate_limit()
+    reloaded = FakeClient()
+    SyncEngine(db, reloaded)                   # loads + ages the saved observation
+    assert reloaded.rate_limit is not None, "rate limit not restored across runs"
+    assert reloaded.rate_limit['short_usage'] == 10   # fresh -> unchanged
 
     print("All smoke tests passed.")
     return 0

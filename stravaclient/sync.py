@@ -1,16 +1,20 @@
 """Sync engine: replicate Strava activities into the local database.
 
-Three passes, each independently resumable:
+Passes, each independently resumable:
   1. Activity list — pages /athlete/activities into summary rows. Incremental
      runs use after= with a 14-day overlap to pick up recent edits.
-  2. Enrichment — per activity, fetch detail + streams + laps (3 requests).
-     Throttled against Strava's read rate limit: sleeps through 15-minute
-     windows, stops cleanly when the daily quota is gone.
-  3. Metrics — compute TRIMP/NP/TSS/zone times for anything with streams.
+  2. Enrichment — per activity, fetch detail + streams + laps (3 requests),
+     then immediately compute its metrics (TRIMP/NP/TSS/zone times) and commit
+     both together. Throttled against Strava's read rate limit: sleeps through
+     15-minute windows, stops cleanly when the daily quota is gone.
 
-Interrupting at any point is safe; the next run picks up where it left off.
+Because metrics are computed inline as each activity is enriched, interrupting
+at any point (Ctrl-C, shutdown, rate-limit wait) leaves every finished activity
+fully processed — never streams without metrics. A final compute_metrics() pass
+acts as a safety net that backfills anything stranded by older runs.
 """
 
+import json
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -31,6 +35,20 @@ LIST_OVERLAP_SECONDS = 14 * 86400
 # Stop issuing requests when within this margin of a quota.
 RATE_LIMIT_MARGIN = 3
 
+# Wake this many seconds *after* a window boundary. Strava's 15-min windows are
+# aligned to the UTC quarter-hour, but clock skew and reset-phase jitter mean a
+# tiny cushion can land the probe back in the old window; 30s absorbs that.
+WINDOW_CUSHION_SECONDS = 30
+
+# If a probe still 429s right after a window boundary (woke a touch early),
+# retry after this delay, doubling up to the next boundary, instead of sleeping
+# a whole extra 15-minute window.
+SHORT_BACKOFF_SECONDS = 30
+
+# sync_state key under which the latest rate-limit observation is persisted, so
+# throttling survives across separate sync runs.
+RATE_LIMIT_STATE_KEY = 'rate_limit'
+
 
 class DailyLimitReached(Exception):
     """Daily read quota exhausted; sync should stop and resume tomorrow."""
@@ -42,9 +60,26 @@ def _parse_start_ts(start_date: str) -> float:
 
 
 def _seconds_to_next_window() -> float:
-    """Seconds until the next 15-minute rate-limit window (quarter hour UTC)."""
+    """Seconds until the next 15-minute rate-limit window (quarter hour UTC),
+    plus a cushion so the next request lands safely inside the new window."""
     now = time.time()
-    return (int(now // 900) + 1) * 900 - now + 5
+    return (int(now // 900) + 1) * 900 - now + WINDOW_CUSHION_SECONDS
+
+
+def _age_rate_limit(rl: Optional[dict]) -> Optional[dict]:
+    """Zero out usage counts whose window/day has elapsed since they were
+    observed, so a stale observation from a prior run doesn't over- or
+    under-throttle. Mutates and returns the dict."""
+    if not rl or 'observed_at' not in rl:
+        return rl
+    now = time.time()
+    obs = rl['observed_at']
+    if int(now // 900) != int(obs // 900):
+        rl['short_usage'] = 0          # the 15-min window has rolled over
+    if (datetime.fromtimestamp(now, timezone.utc).date()
+            != datetime.fromtimestamp(obs, timezone.utc).date()):
+        rl['daily_usage'] = 0          # the UTC day has rolled over
+    return rl
 
 
 class SyncEngine:
@@ -52,11 +87,32 @@ class SyncEngine:
         self.db = db
         self.client = client
         self.requests_made = 0
+        self._load_rate_limit()
 
     # -- rate-limit-aware request wrapper ------------------------------------
 
+    def _load_rate_limit(self):
+        """Seed the client's rate-limit view from the last run so the first
+        request is throttled instead of going out blind."""
+        if self.client is None or self.client.rate_limit is not None:
+            return
+        saved = self.db.get_state(RATE_LIMIT_STATE_KEY)
+        if not saved:
+            return
+        try:
+            rl = json.loads(saved)
+        except (ValueError, TypeError):
+            return
+        self.client.rate_limit = _age_rate_limit(rl)
+
+    def _persist_rate_limit(self):
+        """Save the latest rate-limit observation so the next run sees it."""
+        if self.client is not None and self.client.rate_limit:
+            self.db.set_state(RATE_LIMIT_STATE_KEY,
+                              json.dumps(self.client.rate_limit))
+
     def _wait_for_budget(self):
-        rl = self.client.rate_limit
+        rl = _age_rate_limit(self.client.rate_limit)
         if not rl:
             return
         if rl['daily_usage'] >= rl['daily_limit'] - RATE_LIMIT_MARGIN:
@@ -66,22 +122,39 @@ class SyncEngine:
             print(f"  Rate limit window full ({rl['short_usage']}/{rl['short_limit']}), "
                   f"sleeping {wait / 60:.1f} min...")
             time.sleep(wait)
+            # The window has rolled over: optimistically clear the short count
+            # so the next request probes the new window instead of re-sleeping a
+            # whole one. The probe's response headers correct this; if we woke a
+            # touch early, the 429 path below backs off briefly.
+            rl['short_usage'] = 0
 
     def _call(self, fn, *args, **kwargs):
         """Make an API call, sleeping through 15-minute limits and raising
         DailyLimitReached when the daily quota is gone."""
+        backoff = SHORT_BACKOFF_SECONDS
         while True:
             self._wait_for_budget()
             try:
                 result = fn(*args, **kwargs)
                 self.requests_made += 1
+                self._persist_rate_limit()
                 return result
             except RateLimitError as e:
+                self._persist_rate_limit()
                 if e.daily:
                     raise DailyLimitReached() from e
-                wait = _seconds_to_next_window()
-                print(f"  Hit 15-min rate limit, sleeping {wait / 60:.1f} min...")
-                time.sleep(wait)
+                # Either we probed a few seconds early after a boundary, or the
+                # window genuinely filled. Back off briefly and retry rather
+                # than burning a full window; grow the delay up to the next
+                # boundary so a truly-full window still resolves promptly.
+                print(f"  15-min limit still in effect, retrying in {backoff:.0f}s...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, _seconds_to_next_window())
+                # Clear the maxed short count so the retry probes the window
+                # again instead of _wait_for_budget re-sleeping a full one; the
+                # probe's response headers restore the true usage.
+                if self.client.rate_limit:
+                    self.client.rate_limit['short_usage'] = 0
 
     # -- pass 1: athlete context ---------------------------------------------
 
@@ -150,6 +223,10 @@ class SyncEngine:
         done = 0
         for row in pending:
             self._enrich_row(row)
+            # Compute metrics immediately, before moving to the next activity
+            # or waiting on the rate limiter. Streams and metrics are committed
+            # together so an interrupted sync never strands data.
+            self.compute_metrics_for(self.db.get_activity(row['id']))
             done += 1
             label = f"{(row['start_date_local'] or '')[:10]} {row['name'] or row['id']}"
             print(f"  [{done}/{len(pending)}] {label}")
@@ -198,6 +275,7 @@ class SyncEngine:
                     continue
                 row = self.db.get_activity(activity_id)
                 self._enrich_row(row)
+                self.compute_metrics_for(self.db.get_activity(activity_id))
                 done += 1
                 label = f"{(row['start_date_local'] or '')[:10]} {row['name'] or activity_id}"
                 print(f"  [{done}] re-enriched {label}")
@@ -209,25 +287,41 @@ class SyncEngine:
 
     # -- pass 4: derived metrics -----------------------------------------------
 
+    def _birthdate(self):
+        """Cached birthdate lookup (None if unset); read once per run."""
+        if not hasattr(self, '_birthdate_cache'):
+            self._birthdate_cache = self.db.get_state('birthdate')
+        return self._birthdate_cache
+
+    def compute_metrics_for(self, row) -> bool:
+        """Derive and store metrics for one activity from its local streams.
+
+        Returns False (without saving) when no athlete zones cover the
+        activity's date — the caller decides whether to warn or stop.
+        """
+        activity_date = row['start_date_local'] or row['start_date'] or ''
+        zones_row = self.db.zones_for_date(activity_date)
+        if not zones_row:
+            return False
+        hr_max = None
+        birthdate = self._birthdate()
+        if birthdate and activity_date:
+            hr_max = hr_max_for_age(age_on(birthdate, activity_date))
+        streams = self.db.get_streams(row['id'])
+        laps = self.db.get_laps(row['id'])
+        metrics = compute_activity_metrics(row, streams, laps, zones_row,
+                                           hr_max=hr_max)
+        self.db.save_derived_metrics(row['id'], metrics)
+        return True
+
     def compute_metrics(self, recompute: bool = False) -> int:
         rows = (self.db.activities_with_streams() if recompute
                 else self.db.activities_needing_metrics())
-        birthdate = self.db.get_state('birthdate')
         computed = 0
         for row in rows:
-            activity_date = row['start_date_local'] or row['start_date'] or ''
-            zones_row = self.db.zones_for_date(activity_date)
-            if not zones_row:
+            if not self.compute_metrics_for(row):
                 print("  No athlete zones recorded yet; run a sync first.")
                 break
-            hr_max = None
-            if birthdate and activity_date:
-                hr_max = hr_max_for_age(age_on(birthdate, activity_date))
-            streams = self.db.get_streams(row['id'])
-            laps = self.db.get_laps(row['id'])
-            metrics = compute_activity_metrics(row, streams, laps, zones_row,
-                                               hr_max=hr_max)
-            self.db.save_derived_metrics(row['id'], metrics)
             computed += 1
         return computed
 
@@ -260,6 +354,9 @@ class SyncEngine:
         return True
 
     def _finish_metrics(self):
-        print("Computing derived metrics...")
+        # Metrics are normally computed inline during enrichment; this is a
+        # safety net that backfills anything stranded by an older interrupted
+        # run (streams but no metrics). Stays quiet when there's nothing to do.
         n = self.compute_metrics()
-        print(f"  {n} activities computed")
+        if n:
+            print(f"Backfilled metrics for {n} previously un-computed activities")
