@@ -125,6 +125,10 @@ python -m stravaclient status
 python -m stravaclient list
 python -m stravaclient list --days 90 --sport Ride --no-commutes
 
+# --no-plain-commutes hides commutes that aren't tagged as workouts, but keeps
+# commute rides you tagged as a workout (workout_type 3/12, the "W" flag)
+python -m stravaclient list --days 90 --no-plain-commutes
+
 # Trends
 python -m stravaclient trends --metric miles --by week --last 12
 python -m stravaclient trends --metric tss --by month --since 2026-01-01

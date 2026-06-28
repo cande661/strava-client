@@ -26,7 +26,8 @@ ZONES = {
 }
 
 
-def make_summary(i, start_local, distance_m, moving_s, commute=False):
+def make_summary(i, start_local, distance_m, moving_s, commute=False,
+                 workout_type=None):
     return {
         'id': 1000 + i,
         'athlete': {'id': 42},
@@ -43,6 +44,7 @@ def make_summary(i, start_local, distance_m, moving_s, commute=False):
         'device_watts': True,
         'average_heartrate': 140.0,
         'commute': commute,
+        'workout_type': workout_type,
         'manual': False,
         'gear_id': 'b123',
     }
@@ -233,6 +235,25 @@ def main():
     SyncEngine(db, reloaded)                   # loads + ages the saved observation
     assert reloaded.rate_limit is not None, "rate limit not restored across runs"
     assert reloaded.rate_limit['short_usage'] == 10   # fresh -> unchanged
+
+    # Commute filtering in list_activities_rows: --no-plain-commutes keeps
+    # workout-tagged commutes while hiding ordinary ones.
+    db.upsert_activity_summary(make_summary(
+        20, '2027-01-05T08:00:00', 16093.4, 3600, commute=True, workout_type=10))
+    db.upsert_activity_summary(make_summary(
+        21, '2027-01-06T08:00:00', 16093.4, 3600, commute=True, workout_type=12))
+    db.upsert_activity_summary(make_summary(
+        22, '2027-01-07T08:00:00', 16093.4, 3600, commute=False))
+
+    def list_ids(**kw):
+        return {r['id'] for r in db.list_activities_rows(since='2027-01-01', **kw)}
+
+    assert list_ids() == {1020, 1021, 1022}, "baseline list"
+    assert list_ids(commutes=False) == {1022}, "no-commutes hides all commutes"
+    assert list_ids(commutes=True) == {1020, 1021}, "commutes-only"
+    # The new filter: plain commute (1020) hidden, workout commute (1021) kept
+    assert list_ids(exclude_plain_commutes=True) == {1021, 1022}, \
+        "no-plain-commutes should keep workout commutes"
 
     print("All smoke tests passed.")
     return 0
